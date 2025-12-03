@@ -2,12 +2,11 @@ name: Daily Netflix Reviews Clean & Upload
 
 on:
   schedule:
-    # Runs daily at 02:30 UTC — change cron if you want a different time (UTC).
     - cron: '30 2 * * *'
   workflow_dispatch:
 
 jobs:
-  build-and-run:
+  daily:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -15,49 +14,51 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Print environment (debug)
-        run: |
-          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-          echo "HOME=${HOME}"
-          ls -la "${GITHUB_WORKSPACE}" || true
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
-      - name: Create workspace folders (use workspace & HOME)
+      - name: Install system dependencies
         run: |
-          mkdir -p "${GITHUB_WORKSPACE}/data"
-          mkdir -p "${GITHUB_WORKSPACE}/outputs"
-          mkdir -p "${HOME}/.kaggle"
-          chmod 700 "${HOME}/.kaggle"
+          sudo apt-get update
+          sudo apt-get install -y build-essential
 
-      - name: Install system deps (for building wheels / spacy)
-        run: sudo apt-get update && sudo apt-get install -y build-essential
-
-      - name: Install python deps
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm
+          fi
 
-      - name: Write Kaggle JSON from secret (to $HOME/.kaggle/kaggle.json)
+      - name: Decode Kaggle JSON (base64)
+        env:
+          KAGGLE_JSON_B64: ${{ secrets.KAGGLE_JSON_B64 }}
         run: |
-          printf '%s' "${{ secrets.KAGGLE_JSON }}" > "${HOME}/.kaggle/kaggle.json" || true
-          chmod 600 "${HOME}/.kaggle/kaggle.json" || true
-          echo "KAGGLE_CONFIG_DIR=${HOME}/.kaggle" >> $GITHUB_ENV
+          if [ -z "${KAGGLE_JSON_B64}" ]; then
+            echo "::error::KAGGLE_JSON_B64 is missing"
+            exit 1
+          fi
+          mkdir -p $HOME/.kaggle
+          echo "${KAGGLE_JSON_B64}" | base64 --decode > $HOME/.kaggle/kaggle.json
+          chmod 600 $HOME/.kaggle/kaggle.json
+          echo "KAGGLE_CONFIG_DIR=$HOME/.kaggle" >> $GITHUB_ENV
 
-      - name: Write Google Service Account JSON (to $HOME/gcp_sa.json)
+      - name: Decode Google Service Account JSON (base64)
+        env:
+          GCP_SA_JSON_B64: ${{ secrets.GCP_SA_JSON_B64 }}
         run: |
-          printf '%s' "${{ secrets.GCP_SA_JSON }}" > "${HOME}/gcp_sa.json" || true
-          chmod 600 "${HOME}/gcp_sa.json" || true
-          echo "GCP_SA_FILE=${HOME}/gcp_sa.json" >> $GITHUB_ENV
+          if [ -z "${GCP_SA_JSON_B64}" ]; then
+            echo "::warning::GCP_SA_JSON_B64 is missing, sheet upload will fail"
+          else
+            echo "${GCP_SA_JSON_B64}" | base64 --decode > $HOME/gcp_sa.json
+            chmod 600 $HOME/gcp_sa.json
+            echo "GCP_SA_FILE=$HOME/gcp_sa.json" >> $GITHUB_ENV
+          fi
 
-      - name: Install spaCy model (en_core_web_sm)
-        run: |
-          python -m spacy download en_core_web_sm
-
-      - name: Export other env vars
+      - name: Export environment variables
         run: |
           echo "KAGGLE_DATASET_SLUG=${{ secrets.KAGGLE_DATASET_SLUG }}" >> $GITHUB_ENV
           echo "KAGGLE_FILE_NAME=${{ secrets.KAGGLE_FILE_NAME }}" >> $GITHUB_ENV
@@ -65,26 +66,27 @@ jobs:
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
           echo "OUT_CSV_PATH=${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
-      - name: Show directories for debugging
+      - name: Install spaCy model
         run: |
-          echo "HOME contents:"
-          ls -la "${HOME}" | head -n 50 || true
-          echo "Workspace outputs dir:"
-          ls -la "${GITHUB_WORKSPACE}/outputs" || true
+          python -m spacy download en_core_web_sm
+
+      - name: Debug key files exist
+        run: |
+          ls -la $HOME/.kaggle
+          ls -la $HOME/gcp_sa.json || true
 
       - name: Run cleaning script
         env:
+          KAGGLE_CONFIG_DIR: ${{ env.KAGGLE_CONFIG_DIR }}
+          GCP_SA_FILE: ${{ env.GCP_SA_FILE }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
-          # these are picked up by the script via os.getenv fallback
-          GCP_SA_FILE: ${HOME}/gcp_sa.json
-          KAGGLE_CONFIG_DIR: ${HOME}/.kaggle
         run: |
           python scripts/clean_reviews.py
 
-      - name: Upload cleaned CSV as artifact
-        if: always()
+      - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: cleaned-reviews-csv
-          path: ${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv
+          name: cleaned-reviews
+          path: ${{ github.workspace }}/outputs/cleaned_reviews.csv
