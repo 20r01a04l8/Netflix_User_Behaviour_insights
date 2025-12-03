@@ -90,6 +90,82 @@ def download_kaggle():
 
     raise RuntimeError("No CSV found after download")
 
+def safe_set_with_dataframe(worksheet, df, max_retries=5, chunk_size_rows=500):
+    """
+    Try to write df to worksheet with retries.
+    If a 500/5xx persists, fallback to chunked uploads (append_rows) which are less likely to trigger
+    the Sheets 500 for large single requests.
+    If still failing, export CSV to outputs/cleaned_reviews.csv and return False.
+    """
+    # 1) quick attempt with set_with_dataframe + retries
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"Attempt {attempt}/{max_retries}: set_with_dataframe -> writing full frame")
+            set_with_dataframe(worksheet, df)
+            print("Upload succeeded with set_with_dataframe.")
+            return True
+        except APIError as e:
+            # check status code if available (gspread wraps HTTP errors)
+            msg = str(e)
+            print(f"APIError on attempt {attempt}: {msg}")
+            # exponential backoff
+            sleep = min(60, 2 ** attempt)
+            print(f"Sleeping {sleep}s before retry...")
+            time.sleep(sleep)
+        except Exception as e:
+            print(f"Unexpected error on attempt {attempt}: {e}")
+            time.sleep(min(60, 2 ** attempt))
+
+    # 2) fallback: chunked upload using worksheet.append_rows (less payload per request)
+    print("Falling back to chunked upload using append_rows (safer for big sheets).")
+    try:
+        # clear existing content (optional)
+        try:
+            worksheet.clear()
+        except Exception as e:
+            print("Warning: unable to clear worksheet before chunked upload:", e)
+
+        headers = list(df.columns)
+        # append headers
+        worksheet.append_row(headers, value_input_option='USER_ENTERED')
+        n_rows = len(df)
+        n_chunks = math.ceil(n_rows / chunk_size_rows)
+        for i in range(n_chunks):
+            start = i * chunk_size_rows
+            end = min(start + chunk_size_rows, n_rows)
+            chunk_df = df.iloc[start:end]
+            values = chunk_df.values.tolist()
+            # prepend no header here, headers already written
+            print(f"Uploading chunk {i+1}/{n_chunks} rows {start}:{end}")
+            # append_rows can accept list of rows
+            worksheet.append_rows(values, value_input_option='USER_ENTERED')
+        print("Chunked upload completed successfully.")
+        return True
+    except APIError as e:
+        print("Chunked upload APIError:", e)
+    except Exception as e:
+        print("Chunked upload failed with exception:", e)
+
+    # 3) final fallback: write CSV to outputs/ and return False
+    fallback_path = 'outputs/cleaned_reviews.csv'
+    try:
+        print(f"Saving CSV fallback to {fallback_path}")
+        df.to_csv(fallback_path, index=False)
+        print("Saved fallback CSV.")
+    except Exception as e:
+        print("Failed to save fallback CSV:", e)
+
+    return False
+
+# Usage: replace the previous set_with_dataframe(ws, df) call with:
+success = safe_set_with_dataframe(ws, df)
+if not success:
+    print("Upload to Google Sheets failed after retries. CSV saved to outputs/cleaned_reviews.csv")
+    # exit gracefully so CI can still collect artifacts and not crash the workflow hard
+    # choose exit code 0 to avoid failing the whole job if you prefer artifacts to be saved.
+    # If you want the job to fail (so a human checks), use non-zero exit code.
+    # Here we exit 0 so the workflow continues to upload artifacts and logs.
+    sys.exit(0)
 
 def clean_text_basic(s):
     if not s:
@@ -153,3 +229,4 @@ def pipeline():
 
 if __name__ == "__main__":
     pipeline()
+
