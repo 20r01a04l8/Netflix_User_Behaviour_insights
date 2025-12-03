@@ -3,7 +3,7 @@ name: Daily Netflix Reviews Clean & Upload
 on:
   schedule:
     # Runs daily at 02:30 UTC. Edit cron for your timezone / preferred run time.
-    - cron:  '30 2 * * *'
+    - cron:  '10 2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -51,8 +51,6 @@ jobs:
 
       - name: Export other env vars
         run: |
-          echo "KAGGLE_DATASET_SLUG=${{ secrets.KAGGLE_DATASET_SLUG }}" >> $GITHUB_ENV
-          echo "KAGGLE_FILE_NAME=${{ secrets.KAGGLE_FILE_NAME }}" >> $GITHUB_ENV
           echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" >> $GITHUB_ENV
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
           echo "OUT_CSV_PATH=/github/workspace/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
@@ -61,7 +59,6 @@ jobs:
         env:
           # pass through for safety (already in $GITHUB_ENV)
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          SHEET_NAME: ${{ secrets.SHEET_NAME }}
         run: |
           python scripts/clean_reviews.py
 
