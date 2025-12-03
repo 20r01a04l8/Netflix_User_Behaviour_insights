@@ -3,13 +3,13 @@ name: Daily Netflix Reviews Clean & Upload
 on:
   schedule:
     # Runs daily at 02:30 UTC. Edit cron for your timezone / preferred run time.
-    - cron:  '10 2 * * *'
+    - cron: '30 2 * * *'
   workflow_dispatch:
 
 jobs:
   build-and-run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repo
@@ -24,8 +24,9 @@ jobs:
         run: |
           mkdir -p /github/workspace/data
           mkdir -p /github/workspace/outputs
+          mkdir -p /github/home/.kaggle
 
-      - name: Install system deps (for spacy)
+      - name: Install system deps (for building wheels / spacy)
         run: sudo apt-get update && sudo apt-get install -y build-essential
 
       - name: Install python deps
@@ -34,31 +35,44 @@ jobs:
           pip install -r requirements.txt
 
       - name: Write Kaggle JSON from secret
-        if: ${{ secrets.KAGGLE_JSON != '' }}
+        env:
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
         run: |
-          mkdir -p /github/home/.kaggle
-          echo "${{ secrets.KAGGLE_JSON }}" > /github/home/.kaggle/kaggle.json
+          if [ -z "$KAGGLE_JSON" ]; then
+            echo "KAGGLE_JSON secret is empty or not set. The workflow will still attempt to run but kaggle download will likely fail."
+          fi
+          printf '%s' "$KAGGLE_JSON" > /github/home/.kaggle/kaggle.json
           chmod 600 /github/home/.kaggle/kaggle.json
-          # Export KAGGLE config path so kaggle CLI picks it
           echo "KAGGLE_CONFIG_DIR=/github/home/.kaggle" >> $GITHUB_ENV
 
       - name: Write Google Service Account JSON
-        if: ${{ secrets.GCP_SA_JSON != '' }}
+        env:
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
         run: |
-          echo "${{ secrets.GCP_SA_JSON }}" > /github/home/gcp_sa.json
+          if [ -z "$GCP_SA_JSON" ]; then
+            echo "GCP_SA_JSON secret is empty or not set. Sheets write will fail."
+          fi
+          printf '%s' "$GCP_SA_JSON" > /github/home/gcp_sa.json
           chmod 600 /github/home/gcp_sa.json
           echo "GCP_SA_FILE=/github/home/gcp_sa.json" >> $GITHUB_ENV
 
       - name: Export other env vars
         run: |
+          echo "KAGGLE_DATASET_SLUG=${{ secrets.KAGGLE_DATASET_SLUG }}" >> $GITHUB_ENV
+          echo "KAGGLE_FILE_NAME=${{ secrets.KAGGLE_FILE_NAME }}" >> $GITHUB_ENV
           echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" >> $GITHUB_ENV
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
           echo "OUT_CSV_PATH=/github/workspace/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
+      - name: Ensure spacy model available
+        run: |
+          python -m spacy validate || true
+          python -m spacy download en_core_web_sm
+
       - name: Run cleaning script
         env:
-          # pass through for safety (already in $GITHUB_ENV)
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
         run: |
           python scripts/clean_reviews.py
 
