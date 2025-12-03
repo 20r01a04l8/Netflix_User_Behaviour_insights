@@ -2,7 +2,7 @@ name: Daily Netflix Reviews Clean & Upload
 
 on:
   schedule:
-    # Runs daily at 02:30 UTC. Edit cron to your desired run time.
+    # Runs daily at 02:30 UTC — change cron if you want a different time (UTC).
     - cron: '30 2 * * *'
   workflow_dispatch:
 
@@ -26,14 +26,14 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Create workspace folders
+      - name: Create workspace folders (use workspace & HOME)
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/data"
           mkdir -p "${GITHUB_WORKSPACE}/outputs"
           mkdir -p "${HOME}/.kaggle"
           chmod 700 "${HOME}/.kaggle"
 
-      - name: Install system deps (build tools)
+      - name: Install system deps (for building wheels / spacy)
         run: sudo apt-get update && sudo apt-get install -y build-essential
 
       - name: Install python deps
@@ -41,11 +41,10 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm; fi
 
-      - name: Write Kaggle JSON from secret (to $HOME/.kaggle)
+      - name: Write Kaggle JSON from secret (to $HOME/.kaggle/kaggle.json)
         run: |
           printf '%s' "${{ secrets.KAGGLE_JSON }}" > "${HOME}/.kaggle/kaggle.json" || true
           chmod 600 "${HOME}/.kaggle/kaggle.json" || true
-          # Tell kaggle CLI where to find config
           echo "KAGGLE_CONFIG_DIR=${HOME}/.kaggle" >> $GITHUB_ENV
 
       - name: Write Google Service Account JSON (to $HOME/gcp_sa.json)
@@ -66,18 +65,21 @@ jobs:
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
           echo "OUT_CSV_PATH=${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
+      - name: Show directories for debugging
+        run: |
+          echo "HOME contents:"
+          ls -la "${HOME}" | head -n 50 || true
+          echo "Workspace outputs dir:"
+          ls -la "${GITHUB_WORKSPACE}/outputs" || true
+
       - name: Run cleaning script
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
-          # Make sure the script can find the GCP service account path and kaggle config
+          # these are picked up by the script via os.getenv fallback
           GCP_SA_FILE: ${HOME}/gcp_sa.json
           KAGGLE_CONFIG_DIR: ${HOME}/.kaggle
         run: |
-          # show important files for debugging
-          echo "Listing home and workspace files..."
-          ls -la "${HOME}" | head -n 50 || true
-          ls -la "${GITHUB_WORKSPACE}" | head -n 50 || true
           python scripts/clean_reviews.py
 
       - name: Upload cleaned CSV as artifact
