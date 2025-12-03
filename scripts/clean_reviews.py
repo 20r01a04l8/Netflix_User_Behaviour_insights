@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 
 # ========== Config from env ==========
 KAGGLE_SLUG = os.getenv("KAGGLE_DATASET_SLUG", "ashishkumarak/netflix-reviews-playstore-daily-updated")  # change if desired
-KAGGLE_FILE = os.getenv("KAGGLE_FILE_NAME", "")  # optional specific file inside dataset
+KAGGLE_FILE = os.getenv("Netflix_User_Behavior_Cleaned", "")  # optional specific file inside dataset
 SPREADSHEET_ID = os.getenv("1X2xzNdwpEMuaZ7rYA2zlO0k9wDmWt09HvftzOsbdjeA")  # REQUIRED
 SHEET_NAME = os.getenv("SHEET_NAME", "Sheet1")
 GCP_SA_FILE = os.getenv("GCP_SA_FILE", "/github/home/gcp_sa.json")
@@ -243,3 +243,4 @@ def pipeline():
 
 if __name__ == "__main__":
     pipeline()
+
