@@ -15,6 +15,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Print environment (debug)
+        run: |
+          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+          echo "HOME=${HOME}"
+          ls -la "${GITHUB_WORKSPACE}" || true
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -22,9 +28,10 @@ jobs:
 
       - name: Create workspace folders
         run: |
-          mkdir -p /github/workspace/data
-          mkdir -p /github/workspace/outputs
-          mkdir -p /github/home/.kaggle
+          mkdir -p "${GITHUB_WORKSPACE}/data"
+          mkdir -p "${GITHUB_WORKSPACE}/outputs"
+          mkdir -p "${HOME}/.kaggle"
+          chmod 700 "${HOME}/.kaggle"
 
       - name: Install system deps (build tools)
         run: sudo apt-get update && sudo apt-get install -y build-essential
@@ -34,17 +41,18 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm; fi
 
-      - name: Write Kaggle JSON from secret
+      - name: Write Kaggle JSON from secret (to $HOME/.kaggle)
         run: |
-          printf '%s' "${{ secrets.KAGGLE_JSON }}" > /github/home/.kaggle/kaggle.json || true
-          chmod 600 /github/home/.kaggle/kaggle.json || true
-          echo "KAGGLE_CONFIG_DIR=/github/home/.kaggle" >> $GITHUB_ENV
+          printf '%s' "${{ secrets.KAGGLE_JSON }}" > "${HOME}/.kaggle/kaggle.json" || true
+          chmod 600 "${HOME}/.kaggle/kaggle.json" || true
+          # Tell kaggle CLI where to find config
+          echo "KAGGLE_CONFIG_DIR=${HOME}/.kaggle" >> $GITHUB_ENV
 
-      - name: Write Google Service Account JSON
+      - name: Write Google Service Account JSON (to $HOME/gcp_sa.json)
         run: |
-          printf '%s' "${{ secrets.GCP_SA_JSON }}" > /github/home/gcp_sa.json || true
-          chmod 600 /github/home/gcp_sa.json || true
-          echo "GCP_SA_FILE=/github/home/gcp_sa.json" >> $GITHUB_ENV
+          printf '%s' "${{ secrets.GCP_SA_JSON }}" > "${HOME}/gcp_sa.json" || true
+          chmod 600 "${HOME}/gcp_sa.json" || true
+          echo "GCP_SA_FILE=${HOME}/gcp_sa.json" >> $GITHUB_ENV
 
       - name: Install spaCy model (en_core_web_sm)
         run: |
@@ -56,13 +64,20 @@ jobs:
           echo "KAGGLE_FILE_NAME=${{ secrets.KAGGLE_FILE_NAME }}" >> $GITHUB_ENV
           echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" >> $GITHUB_ENV
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
-          echo "OUT_CSV_PATH=/github/workspace/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
+          echo "OUT_CSV_PATH=${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
       - name: Run cleaning script
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          # Make sure the script can find the GCP service account path and kaggle config
+          GCP_SA_FILE: ${HOME}/gcp_sa.json
+          KAGGLE_CONFIG_DIR: ${HOME}/.kaggle
         run: |
+          # show important files for debugging
+          echo "Listing home and workspace files..."
+          ls -la "${HOME}" | head -n 50 || true
+          ls -la "${GITHUB_WORKSPACE}" | head -n 50 || true
           python scripts/clean_reviews.py
 
       - name: Upload cleaned CSV as artifact
@@ -70,4 +85,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cleaned-reviews-csv
-          path: /github/workspace/outputs/cleaned_reviews.csv
+          path: ${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv
