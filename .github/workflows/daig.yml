@@ -1,0 +1,86 @@
+name: Runner Diagnostic - Workspace & Secrets Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Print basic env
+        run: |
+          echo "=== ENV VARS ==="
+          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+          echo "HOME=${HOME}"
+          echo "RUNNER_TEMP=${RUNNER_TEMP}"
+          echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE}"
+          echo "UID=$(id -u) GID=$(id -g)"
+          echo "Current user:"
+          id
+          echo "Disk usage (root):"
+          df -h /
+
+      - name: Create test directories (safe locations)
+        run: |
+          set -x
+          mkdir -p "${GITHUB_WORKSPACE}/diag-data"
+          mkdir -p "${GITHUB_WORKSPACE}/diag-outputs"
+          mkdir -p "${HOME}/.kaggle"
+          mkdir -p "${HOME}/diag"
+          echo "Created dirs:"
+          ls -la "${GITHUB_WORKSPACE}" | head -n 40 || true
+          ls -la "${HOME}" | head -n 40 || true
+
+      - name: Write secrets to files (if present) - do NOT echo secret contents
+        env:
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+        run: |
+          set -euo pipefail
+          # write secrets (they are masked in logs by GitHub)
+          if [ -n "${KAGGLE_JSON:-}" ]; then
+            printf '%s' "${KAGGLE_JSON}" > "${HOME}/.kaggle/kaggle.json"
+            chmod 600 "${HOME}/.kaggle/kaggle.json"
+            echo "Wrote ${HOME}/.kaggle/kaggle.json (size bytes): $(wc -c < "${HOME}/.kaggle/kaggle.json")"
+            # show first/last 1 line counts (not content)
+            echo "kaggle.json lines: $(wc -l < "${HOME}/.kaggle/kaggle.json")"
+          else
+            echo "KAGGLE_JSON secret empty or not set"
+          fi
+
+          if [ -n "${GCP_SA_JSON:-}" ]; then
+            printf '%s' "${GCP_SA_JSON}" > "${HOME}/gcp_sa.json"
+            chmod 600 "${HOME}/gcp_sa.json"
+            echo "Wrote ${HOME}/gcp_sa.json (size bytes): $(wc -c < "${HOME}/gcp_sa.json")"
+            echo "gcp_sa.json lines: $(wc -l < "${HOME}/gcp_sa.json")"
+          else
+            echo "GCP_SA_JSON secret empty or not set"
+          fi
+
+      - name: Verify files and permissions
+        run: |
+          set -x
+          ls -la "${HOME}/.kaggle" || true
+          ls -la "${HOME}/gcp_sa.json" || true
+          # attempt to print masked first 2 chars of each file safely (will be masked)
+          if [ -f "${HOME}/.kaggle/kaggle.json" ]; then head -c 64 "${HOME}/.kaggle/kaggle.json" | sed -n '1p' | sed 's/./*/g' ; fi
+          if [ -f "${HOME}/gcp_sa.json" ]; then head -c 64 "${HOME}/gcp_sa.json" | sed -n '1p' | sed 's/./*/g' ; fi
+
+      - name: Create a small test file in workspace outputs
+        run: |
+          echo "hello from diag $(date --iso-8601=seconds)" > "${GITHUB_WORKSPACE}/diag-outputs/test.txt"
+          chmod 644 "${GITHUB_WORKSPACE}/diag-outputs/test.txt"
+          ls -la "${GITHUB_WORKSPACE}/diag-outputs"
+          cat "${GITHUB_WORKSPACE}/diag-outputs/test.txt" || true
+
+      - name: Final listing
+        run: |
+          echo "--- workspace root ---"
+          ls -la "${GITHUB_WORKSPACE}" | head -n 200
+          echo "--- home ---"
+          ls -la "${HOME}" | head -n 200
