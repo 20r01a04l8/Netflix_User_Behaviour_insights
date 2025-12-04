@@ -87,17 +87,10 @@ jobs:
       - name: Ensure outputs directory
         run: mkdir -p outputs
 
-      - name: Install spaCy model if missing
+      - name: Install spaCy model (idempotent)
         run: |
-          python - <<EOF
-import importlib, subprocess, sys
-try:
-    importlib.import_module("en_core_web_sm")
-    print("spaCy model already present")
-except ImportError:
-    print("Downloading en_core_web_sm...")
-    subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-EOF
+          # This command is safe to run even if the model is already installed.
+          python -m spacy download en_core_web_sm || true
 
       - name: Debug key files
         run: |
