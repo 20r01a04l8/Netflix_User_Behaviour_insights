@@ -5,10 +5,18 @@ on:
     - cron: '30 2 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: daily-netflix-reviews-clean-upload
+  cancel-in-progress: true
+
 jobs:
   daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # total max time for the job - tune as needed
+    timeout-minutes: 90
+
+    env:
+      PYTHON_VERSION: "3.10"
 
     steps:
       - name: Checkout repo
@@ -17,19 +25,36 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
 
-      - name: Install system dependencies
+      - name: Cache pip and spaCy caches
+        uses: actions/cache@v4
+        with:
+          # cache pip wheel/cache and spaCy model cache directories
+          path: |
+            ~/.cache/pip
+            ~/.cache/pip/wheels
+            ~/.local/share/virtualenvs
+            ~/.cache/spacy
+            ~/.local/share/spacy
+          key: ${{ runner.os }}-pip-spacy-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-spacy-
+
+      - name: Install system dependencies (if required)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+          # build-essential is often needed for some Python wheels; keep it minimal.
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential || true
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
+            # minimal default set; adjust if you add new libraries
             pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm
           fi
 
@@ -37,7 +62,7 @@ jobs:
         env:
           KAGGLE_JSON_B64: ${{ secrets.KAGGLE_JSON_B64 }}
         run: |
-          if [ -z "${KAGGLE_JSON_B64}" ]; then
+          if [ -z "${KAGGLE_JSON_B64:-}" ]; then
             echo "::error::KAGGLE_JSON_B64 is missing"
             exit 1
           fi
@@ -46,12 +71,12 @@ jobs:
           chmod 600 $HOME/.kaggle/kaggle.json
           echo "KAGGLE_CONFIG_DIR=$HOME/.kaggle" >> $GITHUB_ENV
 
-      - name: Decode Google Service Account JSON (base64)
+      - name: Decode Google Service Account JSON (base64) (optional)
         env:
           GCP_SA_JSON_B64: ${{ secrets.GCP_SA_JSON_B64 }}
         run: |
-          if [ -z "${GCP_SA_JSON_B64}" ]; then
-            echo "::warning::GCP_SA_JSON_B64 is missing, sheet upload will fail"
+          if [ -z "${GCP_SA_JSON_B64:-}" ]; then
+            echo "::warning::GCP_SA_JSON_B64 is missing, sheet upload will be skipped automatically"
           else
             echo "${GCP_SA_JSON_B64}" | base64 --decode > $HOME/gcp_sa.json
             chmod 600 $HOME/gcp_sa.json
@@ -66,14 +91,28 @@ jobs:
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
           echo "OUT_CSV_PATH=${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
-      - name: Install spaCy model
-        run: |
-          python -m spacy download en_core_web_sm
+      - name: Ensure outputs directory exists
+        run: mkdir -p ${{ github.workspace }}/outputs
 
-      - name: Debug key files exist
+      - name: Install spaCy model if missing (fast check)
         run: |
-          ls -la $HOME/.kaggle
+          python - <<'PY'
+import importlib,sys,subprocess
+try:
+    # fast-check: is model already importable?
+    importlib.import_module("en_core_web_sm")
+    print("spaCy model en_core_web_sm already present, skipping download.")
+except Exception:
+    print("spaCy model not found, attempting to download (this may take a moment)...")
+    subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+PY
+
+      - name: Debug: show key files (for CI logs)
+        run: |
+          ls -la $HOME/.kaggle || true
           ls -la $HOME/gcp_sa.json || true
+          echo "SPREADSHEET_ID = $SPREADSHEET_ID"
+          echo "SHEET_NAME = $SHEET_NAME"
 
       - name: Run cleaning script
         env:
@@ -82,9 +121,15 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
         run: |
-          python scripts/clean_reviews.py
+          # If GCP service account or spreadsheet id is absent, run with --no-sheets to save time
+          run_args=""
+          if [ -z "${GCP_SA_FILE:-}" ] || [ -z "${SPREADSHEET_ID:-}" ]; then
+            echo "GCP_SA_FILE or SPREADSHEET_ID missing -> running with --no-sheets"
+            run_args="--no-sheets"
+          fi
+          python scripts/clean_reviews.py $run_args
 
-      - name: Upload cleaned CSV
+      - name: Upload cleaned CSV artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
