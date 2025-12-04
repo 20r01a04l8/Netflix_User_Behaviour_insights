@@ -12,7 +12,6 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
-    # total max time for the job - tune as needed
     timeout-minutes: 90
 
     env:
@@ -31,22 +30,17 @@ jobs:
       - name: Cache pip and spaCy caches
         uses: actions/cache@v4
         with:
-          # cache pip wheel/cache and spaCy model cache directories
           path: |
             ~/.cache/pip
-            ~/.cache/pip/wheels
-            ~/.local/share/virtualenvs
-            ~/.cache/spacy
             ~/.local/share/spacy
           key: ${{ runner.os }}-pip-spacy-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-spacy-
 
-      - name: Install system dependencies (if required)
+      - name: Install system dependencies
         run: |
-          # build-essential is often needed for some Python wheels; keep it minimal.
           sudo apt-get update -y
-          sudo apt-get install -y build-essential || true
+          sudo apt-get install -y build-essential
 
       - name: Install Python dependencies
         run: |
@@ -54,65 +48,62 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # minimal default set; adjust if you add new libraries
             pip install kaggle gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 gspread-dataframe vaderSentiment spacy wordcloud gensim scikit-learn nltk python-dateutil tqdm
           fi
 
-      - name: Decode Kaggle JSON (base64)
+      - name: Decode Kaggle JSON
         env:
           KAGGLE_JSON_B64: ${{ secrets.KAGGLE_JSON_B64 }}
         run: |
-          if [ -z "${KAGGLE_JSON_B64:-}" ]; then
-            echo "::error::KAGGLE_JSON_B64 is missing"
+          if [ -z "$KAGGLE_JSON_B64" ]; then
+            echo "::error::KAGGLE_JSON_B64 missing"
             exit 1
           fi
-          mkdir -p $HOME/.kaggle
-          echo "${KAGGLE_JSON_B64}" | base64 --decode > $HOME/.kaggle/kaggle.json
-          chmod 600 $HOME/.kaggle/kaggle.json
+          mkdir -p ~/.kaggle
+          echo "$KAGGLE_JSON_B64" | base64 --decode > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
           echo "KAGGLE_CONFIG_DIR=$HOME/.kaggle" >> $GITHUB_ENV
 
-      - name: Decode Google Service Account JSON (base64) (optional)
+      - name: Decode Google Service Account (optional)
         env:
           GCP_SA_JSON_B64: ${{ secrets.GCP_SA_JSON_B64 }}
         run: |
-          if [ -z "${GCP_SA_JSON_B64:-}" ]; then
-            echo "::warning::GCP_SA_JSON_B64 is missing, sheet upload will be skipped automatically"
+          if [ -z "$GCP_SA_JSON_B64" ]; then
+            echo "::warning::GCP_SA_JSON_B64 missing, Sheets upload will be skipped"
           else
-            echo "${GCP_SA_JSON_B64}" | base64 --decode > $HOME/gcp_sa.json
-            chmod 600 $HOME/gcp_sa.json
+            echo "$GCP_SA_JSON_B64" | base64 --decode > ~/gcp_sa.json
+            chmod 600 ~/gcp_sa.json
             echo "GCP_SA_FILE=$HOME/gcp_sa.json" >> $GITHUB_ENV
           fi
 
-      - name: Export environment variables
+      - name: Export env vars
         run: |
           echo "KAGGLE_DATASET_SLUG=${{ secrets.KAGGLE_DATASET_SLUG }}" >> $GITHUB_ENV
           echo "KAGGLE_FILE_NAME=${{ secrets.KAGGLE_FILE_NAME }}" >> $GITHUB_ENV
           echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" >> $GITHUB_ENV
           echo "SHEET_NAME=${{ secrets.SHEET_NAME }}" >> $GITHUB_ENV
-          echo "OUT_CSV_PATH=${GITHUB_WORKSPACE}/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
+          echo "OUT_CSV_PATH=$GITHUB_WORKSPACE/outputs/cleaned_reviews.csv" >> $GITHUB_ENV
 
-      - name: Ensure outputs directory exists
-        run: mkdir -p ${{ github.workspace }}/outputs
+      - name: Ensure outputs directory
+        run: mkdir -p outputs
 
-      - name: Install spaCy model if missing (fast check)
+      - name: Install spaCy model if missing
         run: |
-          python - <<'PY'
-import importlib,sys,subprocess
+          python - <<EOF
+import importlib, subprocess, sys
 try:
-    # fast-check: is model already importable?
     importlib.import_module("en_core_web_sm")
-    print("spaCy model en_core_web_sm already present, skipping download.")
-except Exception:
-    print("spaCy model not found, attempting to download (this may take a moment)...")
+    print("spaCy model already present")
+except ImportError:
+    print("Downloading en_core_web_sm...")
     subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-PY
+EOF
 
-      - name: Debug: show key files (for CI logs)
+      - name: Debug key files
         run: |
-          ls -la $HOME/.kaggle || true
-          ls -la $HOME/gcp_sa.json || true
-          echo "SPREADSHEET_ID = $SPREADSHEET_ID"
-          echo "SHEET_NAME = $SHEET_NAME"
+          ls -la ~/.kaggle || true
+          ls -la ~/gcp_sa.json || true
+          echo "Spreadsheet: $SPREADSHEET_ID"
 
       - name: Run cleaning script
         env:
@@ -121,17 +112,16 @@ PY
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
         run: |
-          # If GCP service account or spreadsheet id is absent, run with --no-sheets to save time
-          run_args=""
-          if [ -z "${GCP_SA_FILE:-}" ] || [ -z "${SPREADSHEET_ID:-}" ]; then
-            echo "GCP_SA_FILE or SPREADSHEET_ID missing -> running with --no-sheets"
-            run_args="--no-sheets"
+          if [ -z "$GCP_SA_FILE" ] || [ -z "$SPREADSHEET_ID" ]; then
+            echo "Running with --no-sheets mode"
+            python scripts/clean_reviews.py --no-sheets
+          else
+            python scripts/clean_reviews.py
           fi
-          python scripts/clean_reviews.py $run_args
 
-      - name: Upload cleaned CSV artifact
+      - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: cleaned-reviews
-          path: ${{ github.workspace }}/outputs/cleaned_reviews.csv
+          path: outputs/cleaned_reviews.csv
