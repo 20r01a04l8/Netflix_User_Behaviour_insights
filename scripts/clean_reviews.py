@@ -134,7 +134,6 @@ def to_native_value(v):
     # datetimes -> ISO
     if is_datetime_like(v):
         try:
-            # pandas Timestamp has isoformat
             return v.isoformat()
         except Exception:
             return str(v)
@@ -190,7 +189,16 @@ def sanitize_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
 
     # Convert datetimes columns to ISO strings early (so we won't treat timestamps as floats)
     for col in df2.columns:
-        if pd.api.types.is_datetime64_any_dtype(df2[col]) or df2[col].apply(lambda x: isinstance(x, (pd.Timestamp, datetime, date, dtime))).any():
+        try:
+            # If dtype is datetime-like, convert vectorized
+            if pd.api.types.is_datetime64_any_dtype(df2[col]):
+                df2[col] = df2[col].dt.tz_localize(None).dt.isoformat()
+            else:
+                # Quick check for any timestamp-like objects in non-datetime dtype
+                if df2[col].apply(lambda x: isinstance(x, (pd.Timestamp, datetime, date, dtime))).any():
+                    df2[col] = df2[col].apply(lambda x: x.isoformat() if is_datetime_like(x) else x)
+        except Exception:
+            # fallback conservative approach per-cell
             df2[col] = df2[col].apply(lambda x: x.isoformat() if is_datetime_like(x) else x)
 
     # For numeric columns: replace NaN with 0 (you can choose other sentinel)
@@ -207,8 +215,24 @@ def sanitize_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
     def _convert_cell(x):
         return to_native_value(x)
 
-    # applymap can be expensive but needed to ensure JSON compatibility for append_rows
-    df_safe = df2.applymap(_convert_cell)
+    # Avoid deprecated applymap: use stack->map->unstack approach for elementwise conversion.
+    # This converts every cell via _convert_cell while returning a DataFrame with same shape.
+    try:
+        # stack creates a Series of all values; map applies elementwise function; unstack returns DataFrame
+        s = df2.stack(dropna=False)
+        s = s.map(_convert_cell)
+        df_safe = s.unstack()
+    except Exception:
+        # Fallback: per-column mapping, safer for mixed dtypes and large frames
+        df_safe = df2.copy()
+        for col in df_safe.columns:
+            try:
+                # Use Series.map for each column (more efficient than slow elementwise apply on large frames)
+                df_safe[col] = df_safe[col].map(_convert_cell)
+            except Exception:
+                # final fallback: convert each cell using list comprehension (guaranteed but slower)
+                df_safe[col] = [to_native_value(x) for x in df_safe[col].tolist()]
+
     return df_safe
 
 
