@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-clean_reviews.py — FINAL BASE64 VERSION (fixed)
+clean_reviews.py — FINAL BASE64 VERSION (fixed + Sheets-safe)
 
-Features / fixes applied:
- - Added missing imports (time, math, random, traceback, argparse)
- - Implemented safe_set_with_dataframe with proper imports and error handling
- - Replaced direct set_with_dataframe(ws, df) call with safe_set_with_dataframe
- - Added CLI flag --no-sheets to skip Sheets upload (useful in CI)
- - Writes CSV fallback to OUT_CSV_PATH if Sheets upload fails
- - Improved logging and defensive checks
+This file:
+ - sanitizes data before uploading to Google Sheets (no NaN/inf values)
+ - converts datetimes to ISO strings
+ - converts numpy types to native Python types for JSON compliance
+ - uses set_with_dataframe with retries and a chunked append_rows fallback
+ - preserves --no-sheets CLI flag and CSV fallback
 """
 
 import os
@@ -26,13 +25,14 @@ from sklearn.preprocessing import MinMaxScaler
 import gspread
 from gspread_dataframe import set_with_dataframe
 
-# Missing imports fixed
+# Additional imports
 import time
 import math
 import random
 import traceback
 import argparse
 from gspread.exceptions import APIError
+from datetime import datetime, date, time as dtime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def validate_kaggle():
         raise RuntimeError("kaggle.json missing username/key")
 
     LOGGER.info("Kaggle config OK (username masked: %s***, key length: %d)",
-                data["username"][:2], len(data["key"]))
+                str(data.get("username", ""))[:2], len(str(data.get("key", ""))))
 
 
 def download_kaggle():
@@ -93,8 +93,8 @@ def download_kaggle():
     LOGGER.info("Running Kaggle download...")
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
-    LOGGER.info("Kaggle stdout: %s", result.stdout[:300])
-    LOGGER.info("Kaggle stderr: %s", result.stderr[:300])
+    LOGGER.info("Kaggle stdout: %s", (result.stdout or "")[:500])
+    LOGGER.info("Kaggle stderr: %s", (result.stderr or "")[:500])
 
     if result.returncode != 0:
         raise RuntimeError("Kaggle download failed")
@@ -107,18 +107,130 @@ def download_kaggle():
     raise RuntimeError("No CSV found after download")
 
 
-def safe_set_with_dataframe(worksheet, df, max_retries=5, chunk_size_rows=500):
+# ----------------------------
+# Sanitization helpers
+# ----------------------------
+def is_datetime_like(val):
+    return isinstance(val, (pd.Timestamp, datetime, date, dtime))
+
+
+def to_native_value(v):
     """
-    Try to write df to worksheet with retries.
-    If a 500/5xx persists, fallback to chunked uploads (append_rows) which are less likely to trigger
-    the Sheets 500 for large single requests.
-    If still failing, export CSV to OUT_CSV_PATH and return False.
+    Convert pandas/numpy scalars and datetimes to JSON-friendly native Python types.
+    - NaN/inf/-inf -> "" (empty string)
+    - numpy ints/floats -> native int/float
+    - datetimes -> ISO string
+    - booleans -> bool
+    - others -> str
     """
-    # 1) quick attempt with set_with_dataframe + retries
+    try:
+        # pandas NA / numpy nan
+        if pd.isna(v):
+            return ""
+    except Exception:
+        # pd.isna may raise for some types; continue
+        pass
+
+    # datetimes -> ISO
+    if is_datetime_like(v):
+        try:
+            # pandas Timestamp has isoformat
+            return v.isoformat()
+        except Exception:
+            return str(v)
+
+    # numpy integer types
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    # numpy floating types
+    if isinstance(v, (np.floating,)):
+        fv = float(v)
+        if not np.isfinite(fv):
+            return ""
+        return fv
+    # python float
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            return ""
+        return v
+    # python int
+    if isinstance(v, int):
+        return v
+    # bool
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    # any other numpy scalar
+    if hasattr(v, "item"):
+        try:
+            val = v.item()
+            # recurse to handle numpy types turned into python scalars
+            return to_native_value(val)
+        except Exception:
+            pass
+
+    # fallback to string (safe)
+    try:
+        return str(v)
+    except Exception:
+        return ""
+
+
+def sanitize_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df that is safe to be JSON-serialized for Google Sheets.
+    - replace inf/-inf with NaN
+    - convert datetimes to ISO strings
+    - fill numeric NaN with 0 (or choose to fill with 0)
+    - fill object NaN with ""
+    """
+    df2 = df.copy()
+
+    # Replace inf with NaN for all columns
+    df2.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Convert datetimes columns to ISO strings early (so we won't treat timestamps as floats)
+    for col in df2.columns:
+        if pd.api.types.is_datetime64_any_dtype(df2[col]) or df2[col].apply(lambda x: isinstance(x, (pd.Timestamp, datetime, date, dtime))).any():
+            df2[col] = df2[col].apply(lambda x: x.isoformat() if is_datetime_like(x) else x)
+
+    # For numeric columns: replace NaN with 0 (you can choose other sentinel)
+    for col in df2.columns:
+        if pd.api.types.is_numeric_dtype(df2[col]):
+            # replace nan with 0, ensure finite
+            df2[col] = pd.to_numeric(df2[col], errors="coerce")
+            df2[col] = df2[col].apply(lambda x: 0 if not np.isfinite(x) else x)
+        else:
+            # object columns: ensure no NaN
+            df2[col] = df2[col].where(df2[col].notna(), "")
+
+    # As a final safety: convert any remaining numpy scalar types to Python natives
+    def _convert_cell(x):
+        return to_native_value(x)
+
+    # applymap can be expensive but needed to ensure JSON compatibility for append_rows
+    df_safe = df2.applymap(_convert_cell)
+    return df_safe
+
+
+# ----------------------------
+# Safe upload helper
+# ----------------------------
+def safe_set_with_dataframe(worksheet, df: pd.DataFrame, max_retries=5, chunk_size_rows=500) -> bool:
+    """
+    Upload df to worksheet safely:
+      1) Try set_with_dataframe (single call) with retries.
+      2) If persistent 5xx errors, fallback to chunked append_rows with sanitized values.
+      3) If everything fails, save CSV to OUT_CSV_PATH and return False.
+    """
+
+    # Sanitize before any attempt
+    df_safe = sanitize_for_sheets(df)
+
+    # 1) try the single set_with_dataframe approach
     for attempt in range(1, max_retries + 1):
         try:
             LOGGER.info("Attempt %d/%d: set_with_dataframe -> writing full frame", attempt, max_retries)
-            set_with_dataframe(worksheet, df)
+            set_with_dataframe(worksheet, df_safe, include_index=False, include_column_header=True, resize=True)
             LOGGER.info("Upload succeeded with set_with_dataframe.")
             return True
         except APIError as e:
@@ -132,27 +244,36 @@ def safe_set_with_dataframe(worksheet, df, max_retries=5, chunk_size_rows=500):
             LOGGER.warning("Unexpected error on attempt %d: %s", attempt, e)
             time.sleep(min(60, (2 ** attempt)))
 
-    # 2) fallback: chunked upload using worksheet.append_rows (less payload per request)
+    # 2) fallback to chunked append_rows
     LOGGER.info("Falling back to chunked upload using append_rows (safer for big sheets).")
     try:
-        # clear existing content (optional)
+        # optionally clear worksheet
         try:
             worksheet.clear()
         except Exception as e:
             LOGGER.warning("Unable to clear worksheet before chunked upload: %s", e)
 
-        headers = list(df.columns)
-        # append headers
-        worksheet.append_row(headers, value_input_option='USER_ENTERED')
-        n_rows = len(df)
+        headers = list(df_safe.columns)
+        # append header row (native types)
+        worksheet.append_row(headers, value_input_option="USER_ENTERED")
+
+        n_rows = len(df_safe)
         n_chunks = max(1, math.ceil(n_rows / chunk_size_rows))
         for i in range(n_chunks):
             start = i * chunk_size_rows
             end = min(start + chunk_size_rows, n_rows)
-            chunk_df = df.iloc[start:end]
-            values = chunk_df.values.tolist()
+            chunk_df = df_safe.iloc[start:end]
+
+            # convert to list of lists of native Python types
+            values = []
+            for row in chunk_df.itertuples(index=False, name=None):
+                row_vals = []
+                for cell in row:
+                    row_vals.append(to_native_value(cell))
+                values.append(row_vals)
+
             LOGGER.info("Uploading chunk %d/%d rows %d:%d", i + 1, n_chunks, start, end)
-            worksheet.append_rows(values, value_input_option='USER_ENTERED')
+            worksheet.append_rows(values, value_input_option="USER_ENTERED")
         LOGGER.info("Chunked upload completed successfully.")
         return True
     except APIError as e:
@@ -161,7 +282,7 @@ def safe_set_with_dataframe(worksheet, df, max_retries=5, chunk_size_rows=500):
         LOGGER.error("Chunked upload failed with exception: %s", e)
         traceback.print_exc()
 
-    # 3) final fallback: write CSV to OUT_CSV_PATH and return False
+    # 3) final fallback: write CSV
     fallback_path = OUT_CSV_PATH
     try:
         LOGGER.info("Saving CSV fallback to %s", fallback_path)
@@ -173,6 +294,9 @@ def safe_set_with_dataframe(worksheet, df, max_retries=5, chunk_size_rows=500):
     return False
 
 
+# ----------------------------
+# Text cleaning helpers
+# ----------------------------
 def clean_text_basic(s):
     if not s:
         return ""
@@ -183,6 +307,9 @@ def clean_text_basic(s):
     return s.lower().strip()
 
 
+# ----------------------------
+# Main pipeline
+# ----------------------------
 def pipeline(no_sheets: bool = False):
     """
     Main pipeline:
@@ -218,7 +345,7 @@ def pipeline(no_sheets: bool = False):
 
     LOGGER.info("Text column: %s, Date column: %s, Rating column: %s", TEXT, DATE, RATING)
 
-    # cleaning
+    # basic cleaning
     df["clean_text"] = df[TEXT].fillna("").apply(clean_text_basic)
 
     # load spaCy
@@ -299,7 +426,6 @@ def pipeline(no_sheets: bool = False):
         try:
             ws = sh.worksheet(SHEET_NAME)
             LOGGER.info("Found existing worksheet '%s'", SHEET_NAME)
-            # optionally clear existing to avoid stray cells (we will write full df)
             try:
                 ws.clear()
             except Exception as e:
@@ -316,7 +442,6 @@ def pipeline(no_sheets: bool = False):
     success = safe_set_with_dataframe(ws, df)
     if not success:
         LOGGER.warning("Upload to Google Sheets failed after retries. CSV remained at %s", OUT_CSV_PATH)
-        # Do not hard-fail the whole job; CSV is saved and can be uploaded as an artifact.
         return
 
     LOGGER.info("Google Sheet updated successfully.")
@@ -337,11 +462,9 @@ if __name__ == "__main__":
         traceback.print_exc()
         # Save any last CSV if present to OUT_CSV_PATH (defensive)
         try:
-            # if df exists in locals, write it
             if "df" in locals() and isinstance(df, pd.DataFrame):
                 df.to_csv(OUT_CSV_PATH, index=False)
                 LOGGER.info("Saved intermediate CSV to %s after failure.", OUT_CSV_PATH)
         except Exception as e:
             LOGGER.error("Failed to save intermediate CSV after exception: %s", e)
-        # propagate non-zero exit so CI can detect the failure
         sys.exit(1)
