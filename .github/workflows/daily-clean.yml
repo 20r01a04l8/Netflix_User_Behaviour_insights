@@ -112,9 +112,13 @@ jobs:
             python scripts/clean_reviews.py
           fi
 
-      - name: Dedupe cleaned CSV (shell-only, no python)
+      - name: Dedupe cleaned CSV (robust shell-only, keep last occurrence)
         run: |
+          set -euo pipefail
           CSV="outputs/cleaned_reviews.csv"
+          TMP_BODY="outputs/tmp_body.csv"
+          TMP_BODY_NORM="outputs/tmp_body_norm.csv"
+
           if [ ! -f "$CSV" ]; then
             echo "CSV not found, skipping dedupe."
             exit 0
@@ -123,17 +127,43 @@ jobs:
           # Extract header
           header=$(head -n 1 "$CSV")
 
-          # Dedupe the body (remove header, unique lines, keep last)
-          tail -n +2 "$CSV" | tac | uniq | tac > outputs/tmp_body.csv
+          # Extract body (everything except header)
+          tail -n +2 "$CSV" > "$TMP_BODY"
 
-          # Reattach header
-          echo "$header" > outputs/cleaned_reviews.csv
-          cat outputs/tmp_body.csv >> outputs/cleaned_reviews.csv
+          # Normalize line endings and trailing whitespace (helps matching)
+          # - remove CR if present, strip trailing spaces
+          sed -e 's/\r$//' -e 's/[[:space:]]\+$//' "$TMP_BODY" > "$TMP_BODY_NORM"
 
-          rm outputs/tmp_body.csv
+          # Deduplicate while keeping the LAST occurrence.
+          # Approach: record the last index for each line, then print lines whose index equals the last index.
+          awk '
+          {
+            line = $0
+            # skip empty lines introduced accidentally
+            if (length(line) == 0) { next }
+            last[line] = NR
+            lines[NR] = line
+            total = NR
+          }
+          END {
+            for (i = 1; i <= total; i++) {
+              if ( last[ lines[i] ] == i ) {
+                print lines[i]
+              }
+            }
+          }' "$TMP_BODY_NORM" > "$TMP_BODY_NORM.out"
 
-          echo "Dedupe complete. Final row count:"
-          wc -l outputs/cleaned_reviews.csv
+          # Reattach header and write final deduped CSV
+          {
+            echo "$header"
+            cat "$TMP_BODY_NORM.out"
+          } > "$CSV"
+
+          # cleanup
+          rm -f "$TMP_BODY" "$TMP_BODY_NORM" "$TMP_BODY_NORM.out"
+
+          echo "Dedupe complete. Final row/line count:"
+          wc -l "$CSV"
 
       - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
