@@ -112,6 +112,45 @@ jobs:
             python scripts/clean_reviews.py
           fi
 
+      - name: Dedupe cleaned CSV (remove duplicate rows)
+        # This step will overwrite outputs/cleaned_reviews.csv with a deduped version.
+        run: |
+          set -euo pipefail
+          CSV="outputs/cleaned_reviews.csv"
+          if [ ! -f "$CSV" ]; then
+            echo "No cleaned CSV found at $CSV; skipping dedupe."
+            exit 0
+          fi
+          python - <<'PY'
+import pandas as pd, sys, os
+csv_path = "outputs/cleaned_reviews.csv"
+try:
+    df = pd.read_csv(csv_path)
+except Exception as e:
+    print("Failed to read CSV:", e)
+    sys.exit(1)
+
+orig_n = len(df)
+# Prefer dedupe by commonly used textual column if present
+if "clean_text" in df.columns:
+    subset = ["clean_text"]
+    print(f"Deduplicating by subset={subset}")
+else:
+    # Fall back to dedupe by all columns
+    subset = None
+    print("Deduplicating by all columns")
+
+# keep the last occurrence so newer rows override older ones
+df_deduped = df.drop_duplicates(subset=subset, keep="last")
+deduped_n = len(df_deduped)
+removed = orig_n - deduped_n
+print(f"Rows before: {orig_n}, after dedupe: {deduped_n}, removed: {removed}")
+
+# write back (preserve index False)
+df_deduped.to_csv(csv_path, index=False)
+print(f"Wrote deduped CSV to {csv_path}")
+PY
+
       - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
         if: always()
