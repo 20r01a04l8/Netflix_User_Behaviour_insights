@@ -112,44 +112,28 @@ jobs:
             python scripts/clean_reviews.py
           fi
 
-      - name: Dedupe cleaned CSV (remove duplicate rows)
-        # This step will overwrite outputs/cleaned_reviews.csv with a deduped version.
+      - name: Dedupe cleaned CSV (shell-only, no python)
         run: |
-          set -euo pipefail
           CSV="outputs/cleaned_reviews.csv"
           if [ ! -f "$CSV" ]; then
-            echo "No cleaned CSV found at $CSV; skipping dedupe."
+            echo "CSV not found, skipping dedupe."
             exit 0
           fi
-          python - <<'PY'
-import pandas as pd, sys, os
-csv_path = "outputs/cleaned_reviews.csv"
-try:
-    df = pd.read_csv(csv_path)
-except Exception as e:
-    print("Failed to read CSV:", e)
-    sys.exit(1)
 
-orig_n = len(df)
-# Prefer dedupe by commonly used textual column if present
-if "clean_text" in df.columns:
-    subset = ["clean_text"]
-    print(f"Deduplicating by subset={subset}")
-else:
-    # Fall back to dedupe by all columns
-    subset = None
-    print("Deduplicating by all columns")
+          # Extract header
+          header=$(head -n 1 "$CSV")
 
-# keep the last occurrence so newer rows override older ones
-df_deduped = df.drop_duplicates(subset=subset, keep="last")
-deduped_n = len(df_deduped)
-removed = orig_n - deduped_n
-print(f"Rows before: {orig_n}, after dedupe: {deduped_n}, removed: {removed}")
+          # Dedupe the body (remove header, unique lines, keep last)
+          tail -n +2 "$CSV" | tac | uniq | tac > outputs/tmp_body.csv
 
-# write back (preserve index False)
-df_deduped.to_csv(csv_path, index=False)
-print(f"Wrote deduped CSV to {csv_path}")
-PY
+          # Reattach header
+          echo "$header" > outputs/cleaned_reviews.csv
+          cat outputs/tmp_body.csv >> outputs/cleaned_reviews.csv
+
+          rm outputs/tmp_body.csv
+
+          echo "Dedupe complete. Final row count:"
+          wc -l outputs/cleaned_reviews.csv
 
       - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
